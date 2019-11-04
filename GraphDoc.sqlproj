@@ -67,7 +67,6 @@
   </ItemGroup>
   <ItemGroup>
     <Build Include="GraphDoc\Functions\udf_cs_DepTable.sql" />
-    <None Include="Scripts\ScriptsIgnoredOnImport.sql" />
     <Build Include="GraphDoc.sql" />
     <Build Include="GraphDoc\User Defined Types\udtt_DependencyGraph.sql" />
     <Build Include="GraphDoc\Stored Procedures\usp_cs_DrawDependencyGraph.sql" />
