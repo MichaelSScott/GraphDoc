@@ -21,7 +21,7 @@ AS
 
 	DECLARE @cleanFriendlyName nvarchar(255)
 	-- this really could do with regex
-	set @cleanFriendlyName = replace(replace(replace(replace(replace(replace(isnull(@FriendlyName,'GraphDoc'), ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),':','_')
+	set @cleanFriendlyName = replace(replace(replace(replace(replace(replace(replace(isnull(@FriendlyName,'GraphDoc'), ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),':','_'),',','_')
 
 	declare @sql varchar(1000);
 
@@ -32,14 +32,22 @@ AS
 			gvline varchar(2048) null
 		)
 
+	if object_id('tempdb..#edges') is not null
+		drop table #edges;
+	create table #edges (
+		clusterEdge varchar(2048) null
+	)
+
 	if @graphsection & 1 = 1 or @graphsection & 2 = 2
 	begin
 	/* all or notail section specified so preamble is required
 	*/
 		-- Set up preamble
 		insert into #gvfile values ('/* Command to generate the layout: dot -Tpng ' + @cleanFriendlyName + '.gv > ' + @cleanFriendlyName + '.png */')
+		insert into #gvfile values ('/* sqlcmd -S "myServer\myInstance" -d myDBName -i "script.sql" -E -o myOutputFile.gv -h -1 */')
+		insert into #gvfile values ('/* ' + convert(nvarchar, getdate()) + ' */')
 		insert into #gvfile values ('')
-		insert into #gvfile values ('digraph ' + @cleanFriendlyName + ' {')
+		insert into #gvfile values ('strict digraph ' + @cleanFriendlyName + ' {')
 		insert into #gvfile values ('ratio=auto;')
 		insert into #gvfile values ('rankdir='+ @direction +';')
 		insert into #gvfile values ('overlap=false;')
@@ -50,249 +58,262 @@ AS
 	end
 
 		/* 
-			Process each base object. We only want procs.
+			Process all base objects. We only want procs.
 			Ordinarily there'd only be one base object per execution as it makes for a clearer diagram.
-			But if the user wants to see multiple objects this will still work, though each object will
-			be in its own cluster. Multiple objects clobber any friendly name passed in.
+			But if the user wants to see multiple objects this will still work.
 		*/
 		DECLARE @objpos int = 0;
 		DECLARE @stringPos nvarchar(3);
 		DECLARE @thisbaseobj nvarchar(255);
-		DECLARE @loc nvarchar(6)
 		DECLARE @sources nvarchar(1000);
 		DECLARE @targets nvarchar(1000);
 
 		DECLARE @baseCount int
 		DECLARE @displayName nvarchar(255)
 		Select @baseCount = count(distinct BaseObjectName) from @dep
+		
+		IF @baseCount > 1 
+			Set @displayName  = isnull(@cleanFriendlyName, '') + '_Multiple_Objects'
+		ELSE 
+			Select @thisbaseobj = BaseObjectName from @dep where Level = 0;
+			Set @displayName = coalesce(@cleanFriendlyName, @thisbaseobj, 'No procedures selected!')
+					
+		-- Add local objects subgraph. This only needs doing once per dependency table
+		-- Actually two clusters if overview or hierarchical view, one for the baseobject (helps with job related graphs)
+		-- then the local db cluster
 
-			
-		DECLARE baseobj_Cursor CURSOR FOR  
-			SELECT distinct dl.BaseObjectName, convert(nvarchar, dl.loc) as loc
+		if @overview in ('Y', 'H')
+		begin
+			-- Add a framing cluster node.
+			insert into #gvfile values ('	subgraph cluster_top_' + @displayName + ' {')
+			insert into #gvfile 
+				select  concat('		label=<<B> ' , @displayName, case @overview when 'H' then ' Hierarchical' else '' end, ' Overview.<BR/></B> <I> ', isnull(@description, ''), ' </I>>; ')
+			-- Add a framing cluster node for the subject database. Note there is a constraint that only a single subject db is present in the  dependency table.
+			insert into #gvfile values ('		subgraph cluster_local_' + @displayName + ' {')
+			insert into #gvfile 
+				select top 1 '			label="DB: ' + dl.DBName + '"; ' 
+					from @dep dl 
+					where Level = 0 
+		end
+		else -- not an overview so get an unframed set of graph objects.
+		begin
+			if @description is not null and @graphsection & 128 = 0  insert into #gvfile select  concat('label=<<I><BR/>', @description, '</I>>; ')
+			insert into #gvfile values ('		subgraph local_' + @displayName + ' {')
+		end
+
+		/* 
+			Add the base object nodes. Default shape ellipse.
+			If graphSection = 1 (all) then the convention is that we will have both an overview and a hierarchical
+			diagram available and the node will display with a link to the complementary file. This requires the user
+			to run this procedure twice, for the Y and H overview options. If option N is taken (not usually expected,
+			but nothing to stop it) then it will default its link to the Y file. Note that all links are expected to 
+			be in the current directory.
+			If the graphSections are being built up then this is (currently) for displaying job steps so just display 
+			a static label. However we don't expect a ton of code to be present in job steps so set the tooltip to this
+			code (up to 10 lines say). 
+		*/
+		if @graphsection != 1
+		begin
+			insert into #gvfile 
+			SELECT '			' + dl.BaseObjectName  + ' [style=bold, label="' + @FriendlyName + ' [' + convert(nvarchar, dl.loc) + ']", fontsize=16, tooltip="' 
+					+ isnull(@codesample, 'SQL_STORED_PROCEDURE') + '"] ;'
 			FROM  @dep dl
 			WHERE dl.BaseObjectType in ('SQL_STORED_PROCEDURE')
-			AND ParentObjectName is null
-		OPEN baseobj_Cursor;  
-		FETCH NEXT FROM baseobj_Cursor into @thisbaseobj, @loc;  
-		WHILE @@FETCH_STATUS = 0  
+			AND dl.Level = 0;
+		end
+		else
+		begin
+			insert into #gvfile 
+			SELECT '			' + dl.BaseObjectName  + ' [style=bold, label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+				<TR><TD href=".\'+ dl.BaseObjectName +'_' + case @overview when 'Y' then 'H' else 'Y' end + '.gv.svg" TOOLTIP="Open ' + case @overview when 'Y' then 'Hierarchical ' else 'Over' end + 'view">
+					<B> <font color="#0000ff">' + dl.BaseObjectName + '</font></B><BR/><FONT POINT-SIZE="10"><I> [' + convert(nvarchar, dl.loc) + ']</I></FONT>
+				</TD></TR></TABLE>>, fontsize=16] ;'
+			FROM  @dep dl
+			WHERE dl.BaseObjectType in ('SQL_STORED_PROCEDURE')
+			AND dl.Level = 0;
+		end
+
+		/*
+			Draw a set of local objects
+		*/
+		IF @overview != 'H' -- Overview Y or N  displays lowest level tables and views tied to the base object
 		BEGIN
-			Set @objpos = @objpos + 1;
-			Set @stringPos = convert(nvarchar,@objpos);
-
-			if @baseCount > 1 
-				Set @displayName  = @thisbaseobj
-			else 
-				Set @displayName = isnull(@FriendlyName, @thisbaseobj)
-			
-			-- Add local objects subgraph. This only needs doing once per base object
---			-- Actually two clusters if overview, one for the baseobject (helps with job related graphs)
-			-- then the local db cluster
---			if @objpos = 1
---			begin
-				-- Add base object cluster node if this is an overview.
-				if @overview in ('Y', 'H')
-				begin
-					insert into #gvfile values ('	subgraph cluster_top_' + @thisbaseobj + ' {')
-					insert into #gvfile 
-						select  concat('		label=<<B> ' , @displayName, case @overview when 'H' then ' Hierarchical' else '' end, ' Overview.<BR/></B> <I> ', isnull(@description, ''), ' </I>>; ')
-					insert into #gvfile values ('		subgraph cluster_local_' + @thisbaseobj + ' {')
-					insert into #gvfile 
-						select  '			label="DB: ' + dl.DBName + '"; ' 
-							from @dep dl 
-							where dl.BaseObjectName = '' + @thisbaseobj + ''
-							and Level = 0 
-				end
-				else
-				begin
-					if @description is not null and @graphsection & 128 = 0  insert into #gvfile select  concat('label=<<I><BR/>', @description, '</I>>; ')
-					insert into #gvfile values ('		subgraph local_' + @thisbaseobj + ' {')
-				end
-
-				if @overview != 'H' -- Overview Y or N  displays lowest level tables and views tied to the base object
-				begin
-					
-					-- Add the source and target nodes
-					INSERT INTO #gvfile
-						SELECT distinct '				' 
-							+ case when @overview = 'Y' then  ThisObjectName + @thisbaseobj  else ThisObjectName end
-							+ ' [label="'+ ThisObjectName +'", shape=' 
-									+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
-											WHEN ThisObjectType = 'VIEW' THEN 'component' 
-											--WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
-											ELSE 'box, style="rounded"' end 
-									+ ', tooltip=' + CASE WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' AND @codesample is not null THEN '"' + @codesample + '"' ELSE ThisObjectType END
-							+ '];'
-					FROM @dep 
-					WHERE Level > 0 
-					AND BaseObjectName = '' + @thisbaseobj + ''
-					AND BaseObjectType = 'SQL_STORED_PROCEDURE'
-					AND ThisObjectType <> 'SQL_STORED_PROCEDURE'
-					AND referenced_server_name is null
-					AND referenced_database_name is null
-				end 
-				else
-				begin
-					/* 
-						Otherwise a hierarchical view of things.
-						For this we need to know each object's parent.
-					*/
-					INSERT INTO #gvfile
-						SELECT distinct '				' 
-							+ ThisObjectName
-							+ ' [label="'+ ThisObjectName +'", shape=' 
-									+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
-											WHEN ThisObjectType = 'VIEW' THEN 'component' 
-											WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
-											ELSE 'box, style="rounded"' end 
-							+ '];'
-					FROM @dep 
-					WHERE Level > 0 
-					AND BaseObjectName = '' + @thisbaseobj + ''
-					AND BaseObjectType = 'SQL_STORED_PROCEDURE'
-					--AND ThisObjectType <> 'SQL_STORED_PROCEDURE'
-					AND referenced_server_name is null
-					AND referenced_database_name is null
-				end
---			end
-
+			-- Add the source and target nodes
+			INSERT INTO #gvfile
+				SELECT distinct '			' 
+					+  case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '')  else ThisObjectName end -- Ensures a separation of names for job overview and steps for easier reading of diagrams 
+					+ ' [label="'+ ThisObjectName +'", shape=' 
+							+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
+									WHEN ThisObjectType = 'VIEW' THEN 'component' 
+									--WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
+									ELSE 'box, style="rounded"' end 
+							+ ', tooltip=' + CASE WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' AND @codesample is not null THEN '"' + @codesample + '"' ELSE ThisObjectType END
+					+ '];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND BaseObjectType = 'SQL_STORED_PROCEDURE'
+			AND ThisObjectType <> 'SQL_STORED_PROCEDURE'
+			AND referenced_server_name is null
+			AND referenced_database_name is null
+		END 
+		ELSE -- H
+		BEGIN
 			/* 
-				Add the base object node. Default shape ellipse.
-				If graphSection = 1 (all) then the convention is that we will have both an overview and a hierarchical
-				diagram available and the node will display with a link to the complementary file. This requires the user
-				to run this procedure twice, for the Y and H overview options. If option N is taken (not usually expected,
-				but nothing to stop it) then it will default its link to the Y file. Note that all links are expected to 
-				be in the current directory.
-				If the graphSections are being built up then this is (currently) for displaying job steps so just display 
-				a static label. However we don't expect a ton of code to be present in job steps so set the tooltip to this
-				code (up to 10 lines say). 
+				Otherwise a hierarchical view of things.
+				For this we need to know each object's parent.
 			*/
-			if @graphsection != 1
-			begin
-				
-				insert into #gvfile values ('			' + @thisbaseobj  + ' [style=bold, label="' + @displayName + ' [' + @loc + ']", fontsize=16, tooltip="' + isnull(@codesample, 'SQL_STORED_PROCEDURE') + '"] ;')
-			end
-			else
-			begin
-				insert into #gvfile values ('			' + @thisbaseobj  + ' [style=bold, label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
-							<TR><TD href=".\'+ @thisbaseobj +'_' + case @overview when 'Y' then 'H' else 'Y' end + '.gv.svg" TOOLTIP="Open ' + case @overview when 'Y' then 'Hierarchical ' else 'Over' end + 'view">
-								<B> <font color="#0000ff">' + @displayName + '</font></B><BR/><FONT POINT-SIZE="10"><I> [' + @loc + ']</I></FONT>
-							</TD></TR></TABLE>>, fontsize=16] ;')
-			end
+			INSERT INTO #gvfile
+			SELECT distinct '			' 
+					+ ThisObjectName
+					+ ' [label="'+ ThisObjectName +'", shape=' 
+							+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
+									WHEN ThisObjectType = 'VIEW' THEN 'component' 
+									WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
+									ELSE 'box, style="rounded"' end 
+					+ '];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND BaseObjectType = 'SQL_STORED_PROCEDURE'
+			AND referenced_server_name is null
+			AND referenced_database_name is null
+		END
+
+		-- Close the subgraph.
+		insert into #gvfile values ('		} # end local')
+
+		-- Get the source tables and views on the local db used by the base object
+		-- and create the edges for them
+		-- These could go inside the above subgraph but for symmetry with the non-local dbs put them after. 
+
+		if @overview != 'H'
+		begin
+			INSERT INTO #gvfile
+			SELECT distinct '		' + case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + ' -> ' + BaseObjectName + ';'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType in ('USER_TABLE', 'VIEW')
+			AND srcdest = 1 
+
+		-- Get a list of target tables on the local db as for sources
+								
+			INSERT INTO #gvfile
+			SELECT distinct '		' + BaseObjectName + ' -> ' +  case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + ';'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType = 'USER_TABLE'
+			AND srcdest > 1 -- insert, update or delete then this is a target table. 
+		end
+		else -- @overview = 'H'. Distinct command to combine multiple arrows due to sp calls at multiple levels.
+		begin
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ThisObjectName + ' -> ' +  ParentObjectName + ';'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType in ('USER_TABLE', 'VIEW')
+			and srcdest = 1
+
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + ' [arrowhead=ovee, color=deeppink, tooltip="calls"];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType = 'SQL_STORED_PROCEDURE'
+			AND srcdest = 1 
+
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + ';'
+			FROM @dep 
+			WHERE Level > 0 
+			AND srcdest > 1 
+			AND referenced_database_name is null
+		end
+
+
+		/*
+			If the graphSection high bit is on then there's something you should know
+		*/
+		if @graphsection & 128 = 128
+		begin	
+			insert into #gvfile 
+			SELECT '			' + BaseObjectName + 'Warning [label="' + @description 
+				+ '", shape=box, color=red, style ="rounded, dashed", fontcolor=red, fontsize=16];'
+			FROM  @dep dl
+			WHERE dl.BaseObjectType = 'SQL_STORED_PROCEDURE'
+			AND dl.Level = 0;
+			
+			insert into #gvfile 
+			SELECT '			' + BaseObjectName + 'Warning -> ' + BaseObjectName + ' [color=red, arrowhead=open];'
+			FROM  @dep dl
+			WHERE dl.BaseObjectType = 'SQL_STORED_PROCEDURE' 
+			AND dl.Level = 0;
+			
+			insert into #gvfile 
+			SELECT '			{rank=same; ' + BaseObjectName + 'Warning; ' + BaseObjectName + ';}'
+			FROM  @dep dl
+			WHERE dl.BaseObjectType = 'SQL_STORED_PROCEDURE'
+			AND dl.Level = 0;
+		end
+
+		-- Add any other referenced databases. One cluster per db per base or parent object depending on overview level.
+		DECLARE @dbident nvarchar(255)
+		DECLARE @clusterIdent nvarchar(255)
+
+		DECLARE @objectname nvarchar(255)
+		DECLARE @parentobjectname nvarchar(255)
+		DECLARE @dbpos int = 0
+
+		-- Add other local server db objects subcluster(s)
+		DECLARE @dbname nvarchar(255);
+		DECLARE @remdbname nvarchar(255);
+		DECLARE @remotesrv nvarchar(255);
+		DECLARE @cleanServerName nvarchar(255);
+		declare @dbsrcobjects nvarchar(1000);
+		declare @dbtargobjects nvarchar(1000);
+			
+		IF @overview != 'H'
+		BEGIN
 
 			/*
-				If the graphSection high bit is on then there's something you should know
+				Draw database clusters as referenced.
 			*/
-			if @graphsection & 128 = 128
-			begin	
-				insert into #gvfile values ('			' + @thisbaseobj + 'Warning [label="' + @description + '", shape=box, color=red, style ="rounded, dashed", fontcolor=red, fontsize=16];')
-				insert into #gvfile values ('			' + @thisbaseobj + 'Warning -> ' + @thisbaseobj + ' [color=red, arrowhead=open];')
-				insert into #gvfile values ('			{rank=same; ' + @thisbaseobj + 'Warning; ' + @thisbaseobj + ';}')
-			end
+			Declare @serverName nvarchar(255);
+			DECLARE locdb_Cursor CURSOR FOR  
+			SELECT distinct iif(referenced_server_name is null, '', referenced_server_name), referenced_database_name   
+				FROM  @dep 
+				where referenced_database_name is not null
+			OPEN locdb_Cursor;  
+			FETCH NEXT FROM locdb_Cursor into @remotesrv, @dbname;  
+			WHILE @@FETCH_STATUS = 0
+			BEGIN
+				truncate table #edges
 
+				--Remote server names can be ugly so get rid of upsetting characters for use in gv references.
+				Set @cleanServerName = replace(replace(replace(replace(replace(replace(replace(@remotesrv, ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),'[','_'),']', '_')
 
-			-- Get a list of source tables and views on the local db use by the base object
-			-- These go into the the same cluster as the local base objects. 
+				-- Each unique db has a cluster
+				Set @clusterIdent = 'cluster_' + @cleanServerName +'_db_' + @dbname;
+				insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {');
+				Set @serverName = iif(@remotesrv='','(local)', @remoteSrv);
+				insert into #gvfile values ('			label="Server: ' + @serverName +', DB: ' + @dbname +  '"; '); 
 
-			if @overview != 'H'
-			begin
-				INSERT INTO #gvfile
-				SELECT distinct '				' + case when @overview = 'Y' then  ThisObjectName + @thisbaseobj else ThisObjectName end + ' -> ' + @thisbaseobj + ';'
-				FROM @dep 
-				WHERE Level > 0 
-				AND ThisObjectType in ('USER_TABLE', 'VIEW')
-				AND srcdest = 1 
-				AND BaseObjectName = @thisbaseobj 
-
-			-- Get a list of target tables on the local db as for sources
-								
-				INSERT INTO #gvfile
-				SELECT distinct '				' + @thisbaseobj + ' -> ' +  case when @overview = 'Y' then  ThisObjectName + @thisbaseobj else ThisObjectName end + ';'
-				FROM @dep InrTab
-				WHERE Level > 0 
-				AND ThisObjectType = 'USER_TABLE'
-				AND srcdest > 1 -- insert, update or delete then this is a target table. 
-				AND BaseObjectName = @thisbaseobj 
-			end
-			else -- @overview = 'H'. Distinct command to combine multiple arrows due to sp calls at multiple levels.
-			begin
-				INSERT INTO #gvfile
-				SELECT distinct  '				' + ThisObjectName + ' -> ' +  ParentObjectName + ';'
-				FROM @dep InrTab
-				WHERE Level > 0 
-				AND ThisObjectType in ('USER_TABLE', 'VIEW')
-				and srcdest = 1
-				AND BaseObjectName = @thisbaseobj 
-				and ParentObjectName is not null
-
-				INSERT INTO #gvfile
-				SELECT distinct  '				' + ParentObjectName + ' -> ' +  ThisObjectName + ' [arrowhead=ovee, color=deeppink, tooltip="calls"];'
-				FROM @dep InrTab
-				WHERE Level > 0 
-				AND ThisObjectType = 'SQL_STORED_PROCEDURE'
-				AND srcdest = 1 
-				AND BaseObjectName = @thisbaseobj 
-				and ParentObjectName is not null
-
-				INSERT INTO #gvfile
-				SELECT distinct  '				' + ParentObjectName + ' -> ' +  ThisObjectName + ';'
-				FROM @dep InrTab
-				WHERE Level > 0 
-				AND srcdest > 1 
-				AND BaseObjectName = @thisbaseobj 
-				and ParentObjectName is not null
-
-			end
-
-			-- Close the subgraph and run the rest of the processing
-			insert into #gvfile values ('			} # end local')
-
-			-- Add any other referenced databases. One cluster per db per base or parent object depending on overview level.
-			DECLARE @dbident nvarchar(255)
-			DECLARE @clusterIdent nvarchar(255)
-
-			DECLARE @baseobjectname nvarchar(255)
-			DECLARE @parentobjectname nvarchar(255)
-			DECLARE @dbpos int = 0
-
-			-- Add other local server db objects subcluster(s)
-			DECLARE @locdbname nvarchar(255);
-			DECLARE @remdbname nvarchar(255);
-			DECLARE @remotesrv nvarchar(255);
-			DECLARE @cleanRemoteName nvarchar(255);
-			declare @dbsrcobjects nvarchar(1000);
-			declare @dbtargobjects nvarchar(1000);
-			
-			if @overview != 'H'
-			begin
-				DECLARE locsvrdb_Cursor CURSOR FOR  
-					SELECT distinct dl.referenced_database_name, dl.BaseObjectName   
-					FROM  @dep dl
-					where dl.referenced_server_name is null
-					and dl.referenced_database_name is not null
-				Set @dbpos = 0
-				OPEN locsvrdb_Cursor;  
-				FETCH NEXT FROM locsvrdb_Cursor into @locdbname, @baseobjectname ;  
+				-- Now draw table references for each base object that references this server
+				DECLARE locdbobj_Cursor CURSOR FOR  
+					SELECT distinct BaseObjectName   
+					FROM  @dep 
+					where isnull(referenced_server_name,'') = @remotesrv and 
+						referenced_database_name = @dbname
+				OPEN locdbobj_Cursor;  
+				FETCH NEXT FROM locdbobj_Cursor into @objectname ;  
 				WHILE @@FETCH_STATUS = 0  
 				BEGIN
-					Set @dbpos = @dbpos + 1;
-					Set @stringPos = convert(nvarchar,@dbpos);
-
-					-- Each unique db on the local server has a cluster
-					Set @clusterIdent = 'cluster_local_' + @baseobjectname + @locdbname + @stringPos
-					insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {')
-
-					insert into #gvfile values ('			label="DB: ' + @locdbname +  '"; ')			 
-				  
 					-- Get a pipe separated list of source objects from the local server db
-
-					SELECT 
-						@dbsrcobjects = 
+					SELECT @dbsrcobjects = 
 								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
 									FROM @dep InrTab
 									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
 									Level > 0  
-									and referenced_database_name = @locdbname
-									and BaseObjectName = @baseobjectname
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and BaseObjectName = @objectname
 									and srcdest = 1
 									GROUP BY InrTab.ThisObjectName
 									ORDER BY InrTab.ThisObjectName
@@ -300,19 +321,18 @@ AS
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
 					FROM @dep OutTab
-					where OutTab.BaseObjectName = @baseobjectname 
+					where OutTab.BaseObjectName = @objectname 
 					GROUP BY OutTab.BaseObjectName 
 
 					-- Get a pipe separated list of target objects from the remote server db
-
-					SELECT 
-						@dbtargobjects = 
+					SELECT @dbtargobjects = 
 								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
 									FROM @dep InrTab
 									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
 									Level > 0 
-									and referenced_database_name = @locdbname
-									and BaseObjectName = @baseobjectname
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and BaseObjectName = @objectname
 									and srcdest > 1
 									GROUP BY InrTab.ThisObjectName
 									ORDER BY InrTab.ThisObjectName
@@ -320,10 +340,10 @@ AS
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
 					FROM @dep OutTab
-					where OutTab.BaseObjectName = @baseobjectname 
+					where OutTab.BaseObjectName = @objectname 
 					GROUP BY OutTab.BaseObjectName 
 
-					SET @dbident = 'dblocal_' + @locdbname + @stringPos +  @baseobjectname 
+					SET @dbident = 'db_' + @cleanServerName + '_' + @dbname + '_' +  @objectname 
 
 					if @dbsrcobjects is not null
 					begin
@@ -342,140 +362,76 @@ AS
 							insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ", shape = "Mrecord", fontsize=14]; ')								
 					end
 
-					insert into #gvfile values ('		} # end cluster_localdb')
-
+					/* This would be the ideal place to insert the edges from the db objects to the baseobjects into the gv file.
+						However, if the edge is inside the cluster definition it seems like graphviz -sometimes- decides to place the 
+						basobject node inside the db cluster, which is not good.
+						So instead stack up the edges here and poot them out after the cluster is enclosed.
+					*/
 					if @dbsrcobjects is not null
-						insert into #gvfile values ('		' + @dbident + ' -> ' + @baseobjectname  + ' [ltail='+@clusterIdent+'];')
+						insert into #edges values ('		' + @dbident + ' -> ' + @objectname +';')
 					if @dbtargobjects is not null
-						insert into #gvfile values ('		' + @baseobjectname + ' -> ' + @dbident  + '_t [lhead='+@clusterIdent+'] ;')
+						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_t;')
 
-					FETCH NEXT FROM locsvrdb_Cursor into @locdbname, @baseobjectname;  
-				END;  
-				CLOSE locsvrdb_Cursor;  
-				DEALLOCATE locsvrdb_Cursor;  
-		
-				-- Add remote server db objects subcluster(s)
-				DECLARE remsvrdb_Cursor CURSOR FOR  
-					SELECT distinct dl.referenced_server_name, dl.referenced_database_name, dl.BaseObjectName   
-					FROM  @dep dl
-					WHERE dl.referenced_server_name is not null
-					and dl.referenced_database_name is not null
-				Set @dbpos = 0;
-				OPEN remsvrdb_Cursor;  
-				FETCH NEXT FROM remsvrdb_Cursor into @remotesrv, @remdbname, @baseobjectname;  
+					FETCH NEXT FROM locdbobj_Cursor into @objectname ; 
+				END
+				CLOSE locdbobj_Cursor;  
+				DEALLOCATE locdbobj_Cursor;
+
+				insert into #gvfile values ('		} # end cluster_db')
+
+				-- Add the edges we've been saving up.
+				insert into #gvfile
+				select clusterEdge from #edges
+
+				FETCH NEXT FROM locdb_Cursor into @remotesrv, @dbname;
+			END
+			CLOSE locdb_Cursor;  
+			DEALLOCATE locdb_Cursor;  
+		END
+
+		ELSE
+		BEGIN
+			/*
+				Draw database clusters as referenced.
+			*/
+			DECLARE locdb_Cursor CURSOR FOR  
+			SELECT distinct iif(referenced_server_name is null, '', referenced_server_name), referenced_database_name   
+				FROM  @dep 
+				where referenced_database_name is not null
+			OPEN locdb_Cursor;  
+			FETCH NEXT FROM locdb_Cursor into @remotesrv, @dbname;  
+			WHILE @@FETCH_STATUS = 0
+			BEGIN
+				truncate table #edges
+
+				--Remote server names can be ugly so get rid of upsetting characters for use in gv references.
+				Set @cleanServerName = replace(replace(replace(replace(replace(replace(replace(@remotesrv, ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),'[','_'),']', '_')
+
+				-- Each unique db has a cluster
+				Set @clusterIdent = 'cluster_' + @cleanServerName +'_db_' + @dbname;
+				insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {');
+				Set @serverName = iif(@remotesrv='','(local)', @remoteSrv);
+				insert into #gvfile values ('			label="Server: ' + @serverName +', DB: ' + @dbname +  '"; '); 
+
+				-- Now draw table references for each base object that references this server
+				DECLARE locdbobj_Cursor CURSOR FOR  
+					SELECT distinct ParentObjectName   
+					FROM  @dep 
+					where isnull(referenced_server_name,'') = @remotesrv and 
+						referenced_database_name = @dbname
+				OPEN locdbobj_Cursor;  
+				FETCH NEXT FROM locdbobj_Cursor into @objectname ;  
 				WHILE @@FETCH_STATUS = 0  
 				BEGIN
-					Set @dbpos = @dbpos + 1;
-					Set @stringPos = convert(nvarchar,@dbpos);
-
-					Set @cleanRemoteName = replace(replace(replace(replace(replace(replace(replace(@remotesrv, ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),'[','_'),']', '_')
-
-					SET @dbident = 'dbremote_' + '_' + @cleanRemoteName + @stringPos + '_'  +  @baseobjectname
-					Set @clusterIdent = 'cluster_remote_' + @baseobjectname + @cleanRemoteName + '_' +  @remdbname + @stringPos
-
-					-- Each unique db on the remote server has a cluster. Double quote server name node as may contain special chars.
-					insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {')
-
-					insert into #gvfile values ('			label="Server: ' + @remotesrv +', DB: ' + @remdbname +  '"; ')			 
-				  
-					-- Get a pipe separated list of source objects from the remote server db
-
-					declare @remdbsrcobjects nvarchar(1000);
-					SELECT 
-						@remdbsrcobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
-									Level > 0 and 
-									referenced_server_name= @remotesrv and
-									referenced_database_name = @remdbname
-									and BaseObjectName = @baseobjectname
-									and srcdest = 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
-									FOR XML PATH(''),TYPE 
-									).value('.','VARCHAR(MAX)') 
-									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.BaseObjectName = @baseobjectname 
-					GROUP BY OutTab.BaseObjectName 
-
-
-					-- Get a pipe separated list of target objects from the remote server db
-
-					declare @remdbtargobjects nvarchar(1000);
-					SELECT 
-						@remdbtargobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
-									Level > 0 and 
-									referenced_server_name= @remotesrv and
-									referenced_database_name = @remdbname
-									and BaseObjectName = @baseobjectname
-									and srcdest > 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
-									FOR XML PATH(''),TYPE 
-									).value('.','VARCHAR(MAX)') 
-									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.BaseObjectName = @baseobjectname 
-					GROUP BY OutTab.BaseObjectName 
-
-					if @remdbsrcobjects is not null
-					begin
-						insert into #gvfile values('			' + @dbident + ' [label="Source Table(s) ' + @remdbsrcobjects + '", shape = "Mrecord", fontsize=14]; ')
-					end 
-
-					if @remdbtargobjects is not null
-					begin
-						insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ' + @remdbtargobjects + '", shape = "Mrecord", fontsize=14]; ')
-					end
-				
-					insert into #gvfile values ('		} # end cluster_remotedb')
-
-					if @remdbsrcobjects is not null
-						insert into #gvfile values ('		' + @dbident + ' -> ' + @baseobjectname  + '[ltail=' + @clusterIdent +'];')
-					if @remdbtargobjects is not null
-						insert into #gvfile values ('		' + @baseobjectname + ' -> ' + @dbident + '_t [lhead=' + @clusterIdent +'] ;')
-
-					FETCH NEXT FROM remsvrdb_Cursor into @remotesrv, @remdbname, @baseobjectname;  
-				END;  
-				CLOSE remsvrdb_Cursor;  
-				DEALLOCATE remsvrdb_Cursor;
-			end
-			else --'H' -- This and above need massivel
-			begin 
-				DECLARE locsvrdb_Cursor_p CURSOR FOR  
-					SELECT distinct dl.referenced_database_name, dl.ParentObjectName   
-					FROM  @dep dl
-					where dl.referenced_server_name is null
-					and dl.referenced_database_name is not null
-				Set @dbpos = 0
-				OPEN locsvrdb_Cursor_p;  
-				FETCH NEXT FROM locsvrdb_Cursor_p into @locdbname, @parentobjectname ;  
-				WHILE @@FETCH_STATUS = 0  
-				BEGIN
-					Set @dbpos = @dbpos + 1;
-					Set @stringPos = convert(nvarchar,@dbpos);
-
-					-- Each unique db on the local server has a cluster
-					Set @clusterIdent = 'cluster_local_' + @parentobjectname + @locdbname + @stringPos
-					insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {')
-
-					insert into #gvfile values ('			label="DB: ' + @locdbname +  '"; ')			 
-				  
 					-- Get a pipe separated list of source objects from the local server db
-
-					SELECT 
-						@dbsrcobjects = 
+					SELECT @dbsrcobjects = 
 								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
 									FROM @dep InrTab
 									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
 									Level > 0  
-									and referenced_database_name = @locdbname
-									and ParentObjectName = @parentobjectname
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and ParentObjectName = @objectname
 									and srcdest = 1
 									GROUP BY InrTab.ThisObjectName
 									ORDER BY InrTab.ThisObjectName
@@ -483,19 +439,18 @@ AS
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
 					FROM @dep OutTab
-					where OutTab.ParentObjectName = @parentobjectname 
+					where OutTab.ParentObjectName = @objectname 
 					GROUP BY OutTab.ParentObjectName 
 
 					-- Get a pipe separated list of target objects from the remote server db
-
-					SELECT 
-						@dbtargobjects = 
+					SELECT @dbtargobjects = 
 								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
 									FROM @dep InrTab
 									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
 									Level > 0 
-									and referenced_database_name = @locdbname
-									and ParentObjectName = @parentobjectname
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and ParentObjectName = @objectname
 									and srcdest > 1
 									GROUP BY InrTab.ThisObjectName
 									ORDER BY InrTab.ThisObjectName
@@ -503,10 +458,10 @@ AS
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
 					FROM @dep OutTab
-					where OutTab.ParentObjectName = @parentobjectname 
+					where OutTab.ParentObjectName = @objectname 
 					GROUP BY OutTab.ParentObjectName 
 
-					SET @dbident = 'dblocal_' + @locdbname + @stringPos +  @parentobjectname 
+					SET @dbident = 'db_' + @cleanServerName + '_' + @dbname + '_' +  @objectname 
 
 					if @dbsrcobjects is not null
 					begin
@@ -525,113 +480,35 @@ AS
 							insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ", shape = "Mrecord", fontsize=14]; ')								
 					end
 
-					insert into #gvfile values ('		} # end cluster_localdb')
-
+					/* This would be the ideal place to insert the edges from the db objects to the baseobjects into the gv file.
+						However, if the edge is inside the cluster definition it seems like graphviz -sometimes- decides to place the 
+						basobject node inside the db cluster, which is not good.
+						So instead stack up the edges here and poot them out after the cluster is enclosed.
+					*/
 					if @dbsrcobjects is not null
-						insert into #gvfile values ('		' + @dbident + ' -> ' + @parentobjectname  + ' [ltail='+@clusterIdent+'];')
+						insert into #edges values ('		' + @dbident + ' -> ' + @objectname +';')
 					if @dbtargobjects is not null
-						insert into #gvfile values ('		' + @parentobjectname + ' -> ' + @dbident  + '_t [lhead='+@clusterIdent+'] ;')
+						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_t;')
 
-					FETCH NEXT FROM locsvrdb_Cursor_p into @locdbname, @parentobjectname;  
-				END;  
-				CLOSE locsvrdb_Cursor_p;  
-				DEALLOCATE locsvrdb_Cursor_p;  
-		
-				-- Add remote server db objects subcluster(s)
-				DECLARE remsvrdb_Cursor_p CURSOR FOR  
-					SELECT distinct dl.referenced_server_name, dl.referenced_database_name, dl.ParentObjectName   
-					FROM  @dep dl
-					WHERE dl.referenced_server_name is not null
-					and dl.referenced_database_name is not null
-				Set @dbpos = 0;
-				OPEN remsvrdb_Cursor_p;  
-				FETCH NEXT FROM remsvrdb_Cursor_p into @remotesrv, @remdbname, @parentobjectname;  
-				WHILE @@FETCH_STATUS = 0  
-				BEGIN
-					Set @dbpos = @dbpos + 1;
-					Set @stringPos = convert(nvarchar,@dbpos);
+					FETCH NEXT FROM locdbobj_Cursor into @objectname ; 
+				END
+				CLOSE locdbobj_Cursor;  
+				DEALLOCATE locdbobj_Cursor;
 
-					Set @cleanRemoteName = replace(replace(replace(replace(replace(replace(replace(@remotesrv, ' ', '_'), '(','_'), ')','_'), '-','_'),'\','_'),'[','_'),']', '_')
+				insert into #gvfile values ('		} # end cluster_db')
 
-					SET @dbident = 'dbremote_' + '_' + @cleanRemoteName + @stringPos + '_'  +  @parentobjectname
-					Set @clusterIdent = 'cluster_remote_' + @parentobjectname + @cleanRemoteName + '_' +  @remdbname + @stringPos
+				-- Add the edges we've been saving up.
+				insert into #gvfile
+				select clusterEdge from #edges
 
-					-- Each unique db on the remote server has a cluster. Double quote server name node as may contain special chars.
-					insert into #gvfile values ('		subgraph ' + @clusterIdent + ' {')
+				FETCH NEXT FROM locdb_Cursor into @remotesrv, @dbname;
+			END
+			CLOSE locdb_Cursor;  
+			DEALLOCATE locdb_Cursor;  
+		END
 
-					insert into #gvfile values ('			label="Server: ' + @remotesrv +', DB: ' + @remdbname +  '"; ')			 
-				  
-					-- Get a pipe separated list of source objects from the remote server db
-
-					SELECT 
-						@remdbsrcobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
-									Level > 0 and 
-									referenced_server_name= @remotesrv and
-									referenced_database_name = @remdbname
-									and ParentObjectName = @parentobjectname
-									and srcdest = 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
-									FOR XML PATH(''),TYPE 
-									).value('.','VARCHAR(MAX)') 
-									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.ParentObjectName = @parentobjectname 
-					GROUP BY OutTab.ParentObjectName 
-
-					-- Get a pipe separated list of target objects from the remote server db
-					SELECT 
-						@remdbtargobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
-									Level > 0 and 
-									referenced_server_name= @remotesrv and
-									referenced_database_name = @remdbname
-									and ParentObjectName = @parentobjectname
-									and srcdest > 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
-									FOR XML PATH(''),TYPE 
-									).value('.','VARCHAR(MAX)') 
-									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.ParentObjectName = @parentobjectname 
-					GROUP BY OutTab.ParentObjectName 
-
-					if @remdbsrcobjects is not null
-					begin
-						insert into #gvfile values('			' + @dbident + ' [label="Source Table(s) ' + @remdbsrcobjects + '", shape = "Mrecord", fontsize=14]; ')
-					end 
-
-					if @remdbtargobjects is not null
-					begin
-						insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ' + @remdbtargobjects + '", shape = "Mrecord", fontsize=14]; ')
-					end
-				
-					insert into #gvfile values ('		} # end cluster_remotedb')
-
-					if @remdbsrcobjects is not null
-						insert into #gvfile values ('		' + @dbident + ' -> ' + @parentobjectname  + '[ltail=' + @clusterIdent +'];')
-					if @remdbtargobjects is not null
-						insert into #gvfile values ('		' + @parentobjectname + ' -> ' + @dbident + '_t [lhead=' + @clusterIdent +'] ;')
-
-					FETCH NEXT FROM remsvrdb_Cursor_p into @remotesrv, @remdbname, @parentobjectname;  
-				END;  
-				CLOSE remsvrdb_Cursor_p;  
-				DEALLOCATE remsvrdb_Cursor_p;
-			end
-
-			if @overview in ('Y', 'H')
-				insert into #gvfile values ('	} # end cluster_top_ thisbaseobject')
-
-			FETCH NEXT FROM baseobj_Cursor into @thisbaseobj, @loc;   
-		END; 
-		CLOSE baseobj_Cursor;  
-		DEALLOCATE baseobj_Cursor; 
+		IF @overview in ('Y', 'H')
+				insert into #gvfile values ('	} # end cluster_top')
 
 		IF @baseCount = 0
 			insert into #gvfile values ('"' + @FriendlyName + ' has nothing in it."')
@@ -651,9 +528,9 @@ AS
 				Set @label= coalesce(@description, @FriendlyName, 'GraphDoc')
 
 			insert into #gvfile 
-				values ('label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+				values ('	label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
 							<TR><TD href="http://composedsoftware.net" target="_blank" TOOLTIP="Composed Software Ltd">
-								<B> <font color="#0000ff">' + @label + '</font></B>
+									<B> <font color="#0000ff">' + @label + '</font></B>
 							</TD></TR></TABLE>>')
 			insert into #gvfile values ('} # end graph')
 		end 

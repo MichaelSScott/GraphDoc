@@ -1,13 +1,14 @@
 ﻿CREATE FUNCTION [GraphDoc].[udf_cs_DepTable]
 (
+	@BaseObjectSchema nvarchar(255), -- Disambiguate in case of namesakes
 	@BaseObjectName nvarchar(255)	-- A single stored procedure name
 )
 /* 
 	The return table here is defined like the user-defined table type udtt_DependencyGraph.
 	As yet a udf can't return a udtt so we're stuck with doing it this way.
-	Assumption is that object requested will be on the same server as the calling routine.
-	An object might feasibly have namesakes in the database in different schemas or with different
-	object types. In that case the caller will get all of them returned.
+	Assumption is that object requested will be in the same database as the calling routine.
+	An object might feasibly have namesakes in the database in different schemas which is why the 
+	schema name is required.
 */
 RETURNS @returntable TABLE
 (
@@ -33,7 +34,7 @@ BEGIN
 		, ThisObjectSchemaName, ThisObjectID, ThisObjectName , ThisObjectType , Level 
 		, referenced_database_name, referenced_server_name) 
 	as 
-    ( select  -- Base level objects
+    ( select  -- Base level object
 		  base.name		 as BaseObjectName 
         , base.type_desc as BaseObjectType
 		, parent.name	 as ParentName
@@ -50,7 +51,7 @@ BEGIN
 			left join sys.sql_expression_dependencies ed on ed.referenced_id = base.object_id
 			left join sys.objects parent on parent.object_id = ed.referencing_id 
 		where base.type in ('P') 
-		and base.name = @BaseObjectName
+		and base.name = @BaseObjectName and s.name = @BaseObjectSchema
 
 		UNION ALL -- Child objects in the same database.
 		select main.BaseObjectName 
@@ -110,7 +111,8 @@ BEGIN
 	from Dependants as p 
 
 	-- Take a stab at setting the CRUD matrix for each table in each procedure.
-	-- Put found proc names into a table .
+	
+	-- 1. Put found proc names into a table .
 	DECLARE @ObjTable TABLE (line int, ParentName nvarchar(255), ObjName nvarchar(255))
 	INSERT INTO @ObjTable
 	SELECT dense_rank() over( order by ParentObjectName), ParentObjectName, ThisObjectName 
@@ -120,7 +122,7 @@ BEGIN
 			) x
 
 	/*
-		For each proc, load its text and look for lines with dependent table names in.
+		2. For each proc, load its text and look for lines with dependent table names in.
 		Build a reference of tablenames and the crud operations they undergo.
 		Fairly crude, and won't work over split lines but should get most stuff.
 		A regex CLR would be able to provide a more refined solution.
@@ -143,8 +145,9 @@ BEGIN
 		insert into @sptext (code)
 		Select value from string_split(
 			(SELECT OBJECT_DEFINITION(object_id) 
-				FROM sys.procedures 
-				WHERE name = @parentObjName 
+				FROM sys.procedures p
+				JOIN sys.schemas s on s.schema_id = p.schema_id
+				WHERE p.name = @parentObjName and s.name = @BaseObjectSchema
 			), char(10)
 		) 
 		where len(ltrim(replace(value, char(9), ' '))) > 1
@@ -156,13 +159,15 @@ BEGIN
 		WHERE ThisObjectName = @parentObjName
 		
 
-		-- Create a list of table names for the procedure object
+		-- Create a list of table names for the procedure object.
+		-- If the name is on another database then we don't kow explicitly what it is but the presence of any crud words would 
+		--  suggest it's a table or view.
 		-- Main drawback here is that the the dependency table doesn't know about any tables accessed solely via dynamic sql
 		-- in the procedure, which can happen. 
 		delete from @TableNames
 		insert into @TableNames (TableName)
 		select distinct ThisObjectNAme 
-		from @returntable where ThisObjectType = 'USER_TABLE'
+		from @returntable where ThisObjectType in ('USER_TABLE', 'OBJECT_OR_COLUMN')
 		AND ParentObjectName = @parentObjName;
  
  		-- look for the crud words in the text

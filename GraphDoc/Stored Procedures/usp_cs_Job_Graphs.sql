@@ -88,7 +88,7 @@ BEGIN
 
 	set @procname = 'usp_wrapper_' + @wrapper_id + '_' + @cleanJobName
 
-	set @ddl = 'CREATE PROCEDURE ' + @procname +
+	set @ddl = 'CREATE PROCEDURE GraphDoc.' + @procname +
 		' AS
 		BEGIN
 			-- SET NOCOUNT ON added to prevent extra result sets from
@@ -108,7 +108,7 @@ BEGIN
 
 	Insert into @DepTable
 	Select *
-	FROM GraphDoc.udf_cs_DepTable( @procname )
+	FROM GraphDoc.udf_cs_DepTable('GraphDoc', @procname )
 
 	/*
 		Pass the dependency table to the graph generator.
@@ -185,7 +185,7 @@ BEGIN
 			database_name, as it does not know enough to create procs in other databases. Such procs may appear barren
 			on the diagram, but a warning will be displayed.
 		*/
-		set @ddl = 'CREATE PROCEDURE ' + @procname +
+		set @ddl = 'CREATE PROCEDURE GraphDoc.' + @procname +
 		' AS
 		BEGIN
 			-- SET NOCOUNT ON added to prevent extra result sets from
@@ -201,7 +201,7 @@ BEGIN
 
 		Insert into @DepTable
 		Select *
-		FROM GraphDoc.udf_cs_DepTable( @procname )
+		FROM GraphDoc.udf_cs_DepTable( 'GraphDoc', @procname )
 
 		/*
 			Pass the dependency table to the graph generator.
@@ -222,9 +222,9 @@ BEGIN
 				This is only meaningful if the job and steps are bundled. If not then each graph is independent anyway.
 			*/
 			if @pos = 1 /* If this is the first step then the prior is the job overview cluster so set the edge to that cluster */
-				Select '{edge [color=deeppink] ' + @prior + ' -> ' + @procname + ' [ltail= cluster_top_' + @prior + ', minlen=2.5] }'
+				Select '	{edge [color=deeppink] ' + @prior + ' -> ' + @procname + ' [ltail= cluster_top_' + @prior + ', minlen=2.5] }'
 			else
-				Select '{edge [color=deeppink] ' + @prior + ' -> ' + @procname + ' [minlen=2.5] }'
+				Select '	{edge [color=deeppink] ' + @prior + ' -> ' + @procname + ' [minlen=2.5] }'
 			Set @prior = @procname;
 		end
 		else 
