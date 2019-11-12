@@ -59,7 +59,7 @@ You can also pass an SQLServer agent job name and produce a diagram showing an o
 the individual steps that make it up.
 
 In SSMS
-```
+```sql
 :out myFolder\graphtest.gv 
 
 DECLARE @RC int
@@ -71,7 +71,7 @@ EXECUTE @RC = [GraphDoc].[usp_cs_Job_Graphs]
 GO
 
 ```
-
+A sample of the output:
 ![GraphDoc](/job.png)
 
 ## Licence
