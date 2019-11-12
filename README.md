@@ -75,3 +75,4 @@ A sample of the output:
 ![GraphDoc](/job.png)
 
 ## Licence
+MIT
