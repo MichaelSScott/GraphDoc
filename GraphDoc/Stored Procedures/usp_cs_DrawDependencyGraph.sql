@@ -47,7 +47,7 @@ AS
 		insert into #gvfile values ('/* sqlcmd -S "myServer\myInstance" -d myDBName -i "script.sql" -E -o myOutputFile.gv -h -1 */')
 		insert into #gvfile values ('/* ' + convert(nvarchar, getdate()) + ' */')
 		insert into #gvfile values ('')
-		insert into #gvfile values ('strict digraph ' + @cleanFriendlyName + ' {')
+		insert into #gvfile values ('digraph ' + @cleanFriendlyName + ' {')
 		insert into #gvfile values ('ratio=auto;')
 		insert into #gvfile values ('rankdir='+ @direction +';')
 		insert into #gvfile values ('overlap=false;')
