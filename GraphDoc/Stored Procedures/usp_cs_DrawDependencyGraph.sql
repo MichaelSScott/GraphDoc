@@ -125,8 +125,8 @@ AS
 		begin
 			insert into #gvfile 
 			SELECT '			' + dl.BaseObjectName  + ' [style=bold, label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
-				<TR><TD href=".\'+ dl.BaseObjectName +'_' + case @overview when 'Y' then 'H' else 'Y' end + '.gv.svg" TOOLTIP="Open ' + case @overview when 'Y' then 'Hierarchical ' else 'Over' end + 'view">
-					<B> <font color="#0000ff">' + dl.BaseObjectName + '</font></B><BR/><FONT POINT-SIZE="10"><I> [' + convert(nvarchar, dl.loc) + ']</I></FONT>
+				<TR><TD href=".\'+ dl.BaseObjectName +'_' + case @overview when 'Y' then 'H' else 'Y' end + '.svg" TOOLTIP="Open ' + case @overview when 'Y' then 'Hierarchical ' else 'Over' end + 'view">
+					<B> <font color="#0000ff">' + dl.ThisObjectSchemaName + '.' + dl.BaseObjectName + '</font></B><BR/><FONT POINT-SIZE="10"><I> [' + convert(nvarchar, dl.loc) + ']</I></FONT>
 				</TD></TR></TABLE>>, fontsize=16] ;'
 			FROM  @dep dl
 			WHERE dl.BaseObjectType in ('SQL_STORED_PROCEDURE')
@@ -142,7 +142,7 @@ AS
 			INSERT INTO #gvfile
 				SELECT distinct '			' 
 					+  case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '')  else ThisObjectName end -- Ensures a separation of names for job overview and steps for easier reading of diagrams 
-					+ ' [label="'+ ThisObjectName +'", shape=' 
+					+ ' [label="' + ThisObjectSchemaName + '.' + ThisObjectName +'", shape=' 
 							+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
 									WHEN ThisObjectType = 'VIEW' THEN 'component' 
 									--WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
@@ -165,7 +165,7 @@ AS
 			INSERT INTO #gvfile
 			SELECT distinct '			' 
 					+ ThisObjectName
-					+ ' [label="'+ ThisObjectName +'", shape=' 
+					+ ' [label="' + ThisObjectSchemaName + '.' + ThisObjectName +'", shape=' 
 							+ CASE  WHEN ThisObjectType = 'USER_TABLE' THEN 'tab' 
 									WHEN ThisObjectType = 'VIEW' THEN 'component' 
 									WHEN ThisObjectType = 'SQL_STORED_PROCEDURE' THEN 'ellipse' 
@@ -192,16 +192,37 @@ AS
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType in ('USER_TABLE', 'VIEW')
-			AND srcdest = 1 
+			AND srcdest & 1 = 1 
 
 		-- Get a list of target tables on the local db as for sources
 								
+			-- insert
 			INSERT INTO #gvfile
-			SELECT distinct '		' + BaseObjectName + ' -> ' +  case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + ';'
+			SELECT distinct '		' + BaseObjectName + ' -> ' +  
+				case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + ';'
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType = 'USER_TABLE'
-			AND srcdest > 1 -- insert, update or delete then this is a target table. 
+			AND srcdest &2 = 2 
+
+			-- update
+			INSERT INTO #gvfile
+			SELECT distinct '		' + BaseObjectName + ' -> ' +  
+				case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + '[dir=both style=dashed color=purple];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType = 'USER_TABLE'
+			AND srcdest & 4 = 4 
+
+			-- delete
+			INSERT INTO #gvfile
+			SELECT distinct '		' + BaseObjectName + ' -> ' +  
+				case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + '[arrowhead=inv style=dashed color=red];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType = 'USER_TABLE'
+			AND srcdest & 8 = 8   
+
 		end
 		else -- @overview = 'H'. Distinct command to combine multiple arrows due to sp calls at multiple levels.
 		begin
@@ -210,20 +231,37 @@ AS
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType in ('USER_TABLE', 'VIEW')
-			and srcdest = 1
+			and srcdest & 1 = 1
 
 			INSERT INTO #gvfile
 			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + ' [arrowhead=ovee, color=deeppink, tooltip="calls"];'
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType = 'SQL_STORED_PROCEDURE'
-			AND srcdest = 1 
+			AND srcdest & 1 = 1 
 
+			-- insert
 			INSERT INTO #gvfile
 			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + ';'
 			FROM @dep 
 			WHERE Level > 0 
-			AND srcdest > 1 
+			AND srcdest & 2 = 2 
+			AND referenced_database_name is null
+
+			-- update
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + '[dir=both style=dashed color=purple];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND srcdest & 4 = 4 
+			AND referenced_database_name is null
+
+			--delete
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ParentObjectName + ' -> ' +  ThisObjectName + '[arrowhead=inv style=dashed color=red];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND srcdest & 8 = 8 
 			AND referenced_database_name is null
 		end
 
@@ -268,6 +306,7 @@ AS
 		DECLARE @cleanServerName nvarchar(255);
 		declare @dbsrcobjects nvarchar(1000);
 		declare @dbtargobjects nvarchar(1000);
+		declare @dbcallobjects nvarchar(1000);
 			
 		IF @overview != 'H'
 		BEGIN
@@ -307,41 +346,61 @@ AS
 				BEGIN
 					-- Get a pipe separated list of source objects from the local server db
 					SELECT @dbsrcobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
+								STUFF ( ( SELECT ' | ' + inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.BaseObjectName = outTbl.BaseObjectName and 
 									Level > 0  
 									and isnull(referenced_server_name,'') = @remotesrv
 									and referenced_database_name = @dbname
 									and BaseObjectName = @objectname
-									and srcdest = 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
+									and srcdest & 1 = 1
+									and ThisObjectType = 'OBJECT_OR_COLUMN'
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
 									FOR XML PATH(''),TYPE 
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.BaseObjectName = @objectname 
-					GROUP BY OutTab.BaseObjectName 
+					FROM @dep outTbl
+					where outTbl.BaseObjectName = @objectname 
+					GROUP BY outTbl.BaseObjectName 
+
+					SELECT @dbcallobjects = 
+								STUFF ( ( SELECT ' | ' + inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.BaseObjectName = outTbl.BaseObjectName and 
+									Level > 0  
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and BaseObjectName = @objectname
+									and srcdest & 1 = 1
+									and ThisObjectType = 'EXEC'
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									FOR XML PATH(''),TYPE 
+									).value('.','VARCHAR(MAX)') 
+									, 1,1,SPACE(0))
+					FROM @dep outTbl
+					where outTbl.BaseObjectName = @objectname 
+					GROUP BY outTbl.BaseObjectName 
 
 					-- Get a pipe separated list of target objects from the remote server db
 					SELECT @dbtargobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.BaseObjectName = OutTab.BaseObjectName and 
+								STUFF ( ( SELECT ' | ' + inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.BaseObjectName = outTbl.BaseObjectName and 
 									Level > 0 
 									and isnull(referenced_server_name,'') = @remotesrv
 									and referenced_database_name = @dbname
 									and BaseObjectName = @objectname
 									and srcdest > 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
 									FOR XML PATH(''),TYPE 
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.BaseObjectName = @objectname 
-					GROUP BY OutTab.BaseObjectName 
+					FROM @dep outTbl
+					where outTbl.BaseObjectName = @objectname 
+					GROUP BY outTbl.BaseObjectName 
 
 					SET @dbident = 'db_' + @cleanServerName + '_' + @dbname + '_' +  @objectname 
 
@@ -362,6 +421,15 @@ AS
 							insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ", shape = "Mrecord", fontsize=14]; ')								
 					end
 
+					if @dbcallobjects is not null
+					begin
+						IF @collapse_nonlocal_db <> 'Y'
+							insert into #gvfile values('			' + @dbident + '_x [label="Call(s) ' + @dbcallobjects + '", shape = "Mrecord", fontsize=14]; ')
+						ELSE 
+							insert into #gvfile values('			' + @dbident + '_x [label="Call(s) ", shape = "Mrecord", fontsize=14]; ')								
+					end
+
+
 					/* This would be the ideal place to insert the edges from the db objects to the baseobjects into the gv file.
 						However, if the edge is inside the cluster definition it seems like graphviz -sometimes- decides to place the 
 						basobject node inside the db cluster, which is not good.
@@ -371,6 +439,9 @@ AS
 						insert into #edges values ('		' + @dbident + ' -> ' + @objectname +';')
 					if @dbtargobjects is not null
 						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_t;')
+					if @dbcallobjects is not null
+						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_x [arrowhead=ovee, color=deeppink, tooltip="calls"];')
+
 
 					FETCH NEXT FROM locdbobj_Cursor into @objectname ; 
 				END
@@ -425,41 +496,61 @@ AS
 				BEGIN
 					-- Get a pipe separated list of source objects from the local server db
 					SELECT @dbsrcobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
+								STUFF ( ( SELECT ' | ' + inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.ParentObjectName = outTbl.ParentObjectName and 
 									Level > 0  
 									and isnull(referenced_server_name,'') = @remotesrv
 									and referenced_database_name = @dbname
 									and ParentObjectName = @objectname
-									and srcdest = 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
+									and srcdest & 1 = 1
+									and ThisObjectType = 'OBJECT_OR_COLUMN'
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
 									FOR XML PATH(''),TYPE 
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.ParentObjectName = @objectname 
-					GROUP BY OutTab.ParentObjectName 
+					FROM @dep outTbl
+					where outTbl.ParentObjectName = @objectname 
+					GROUP BY outTbl.ParentObjectName 
+
+					SELECT @dbcallobjects = 
+								STUFF ( ( SELECT ' | ' +  inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.ParentObjectName = outTbl.ParentObjectName and 
+									Level > 0  
+									and isnull(referenced_server_name,'') = @remotesrv
+									and referenced_database_name = @dbname
+									and ParentObjectName = @objectname
+									and srcdest & 1 = 1
+									and ThisObjectType = 'EXEC'
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									FOR XML PATH(''),TYPE 
+									).value('.','VARCHAR(MAX)') 
+									, 1,1,SPACE(0))
+					FROM @dep outTbl
+					where outTbl.ParentObjectName = @objectname 
+					GROUP BY outTbl.ParentObjectName 
 
 					-- Get a pipe separated list of target objects from the remote server db
 					SELECT @dbtargobjects = 
-								STUFF ( ( SELECT ' | '+InrTab.ThisObjectName
-									FROM @dep InrTab
-									WHERE InrTab.ParentObjectName = OutTab.ParentObjectName and 
+								STUFF ( ( SELECT ' | ' + inTbl.ThisObjectSchemaName + '.' + inTbl.ThisObjectName
+									FROM @dep inTbl
+									WHERE inTbl.ParentObjectName = outTbl.ParentObjectName and 
 									Level > 0 
 									and isnull(referenced_server_name,'') = @remotesrv
 									and referenced_database_name = @dbname
 									and ParentObjectName = @objectname
 									and srcdest > 1
-									GROUP BY InrTab.ThisObjectName
-									ORDER BY InrTab.ThisObjectName
+									GROUP BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
+									ORDER BY inTbl.ThisObjectSchemaName, inTbl.ThisObjectName
 									FOR XML PATH(''),TYPE 
 									).value('.','VARCHAR(MAX)') 
 									, 1,1,SPACE(0))
-					FROM @dep OutTab
-					where OutTab.ParentObjectName = @objectname 
-					GROUP BY OutTab.ParentObjectName 
+					FROM @dep outTbl
+					where outTbl.ParentObjectName = @objectname 
+					GROUP BY outTbl.ParentObjectName 
 
 					SET @dbident = 'db_' + @cleanServerName + '_' + @dbname + '_' +  @objectname 
 
@@ -480,6 +571,16 @@ AS
 							insert into #gvfile values('			' + @dbident + '_t [label="Target Table(s) ", shape = "Mrecord", fontsize=14]; ')								
 					end
 
+					if @dbcallobjects is not null
+					begin
+						
+						IF @collapse_nonlocal_db <> 'Y'
+							insert into #gvfile values('			' + @dbident + '_x  [label="Call(s) ' + @dbcallobjects + '", shape = "Mrecord", fontsize=14]; ')
+						ELSE 
+							insert into #gvfile values('			' + @dbident + '_x  [label="Call(s) ", shape = "Mrecord", fontsize=14]; ')
+					end
+
+
 					/* This would be the ideal place to insert the edges from the db objects to the baseobjects into the gv file.
 						However, if the edge is inside the cluster definition it seems like graphviz -sometimes- decides to place the 
 						basobject node inside the db cluster, which is not good.
@@ -489,6 +590,8 @@ AS
 						insert into #edges values ('		' + @dbident + ' -> ' + @objectname +';')
 					if @dbtargobjects is not null
 						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_t;')
+					if @dbcallobjects is not null
+						insert into #edges values ('		' + @objectname + ' -> ' + @dbident  + '_x [arrowhead=ovee, color=deeppink, tooltip="calls"];')
 
 					FETCH NEXT FROM locdbobj_Cursor into @objectname ; 
 				END

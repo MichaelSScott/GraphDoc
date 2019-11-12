@@ -7,7 +7,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectVersion>4.1</ProjectVersion>
     <ProjectGuid>{64314d87-df64-4961-8911-97884826771a}</ProjectGuid>
-    <DSP>Microsoft.Data.Tools.Schema.Sql.Sql140DatabaseSchemaProvider</DSP>
+    <DSP>Microsoft.Data.Tools.Schema.Sql.Sql130DatabaseSchemaProvider</DSP>
     <OutputType>Database</OutputType>
     <RootPath>
     </RootPath>
@@ -75,6 +75,12 @@
     <Build Include="GraphDoc\User Defined Types\udtt_JobStepGraphing.sql" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="GraphDocToSubjectDB.publish.xml" />
+    <None Include="GraphDoc_CSDEV17.publish.xml" />
+    <None Include="GraphDoc_CSDEV14.publish.xml" />
+    <None Include="GraphDoc_CSDEV16.publish.xml" />
+  </ItemGroup>
+  <ItemGroup>
     <ArtifactReference Include="C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\Extensions\Microsoft\SQLDB\Extensions\SqlServer\140\SqlSchemas\msdb.dacpac">
       <HintPath>C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\Extensions\Microsoft\SQLDB\Extensions\SqlServer\140\SqlSchemas\msdb.dacpac</HintPath>
       <SuppressMissingDependenciesErrors>False</SuppressMissingDependenciesErrors>
@@ -85,9 +91,5 @@
       <SuppressMissingDependenciesErrors>False</SuppressMissingDependenciesErrors>
       <DatabaseVariableLiteralValue>master</DatabaseVariableLiteralValue>
     </ArtifactReference>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="GraphDocToSubjectDB.publish.xml" />
-    <None Include="GraphDoc_CSDEV17.publish.xml" />
   </ItemGroup>
 </Project>

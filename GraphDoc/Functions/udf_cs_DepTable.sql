@@ -16,6 +16,7 @@ RETURNS @returntable TABLE
 	, DBName nvarchar(255)
 	, BaseObjectName nvarchar(255)
 	, BaseObjectType nvarchar(255)
+	, ParentObjectSchemaName nvarchar(255)
 	, ParentObjectName nvarchar(255)
 	, ParentObjectType nvarchar(255)
 	, ThisObjectSchemaName nvarchar(255)
@@ -30,13 +31,14 @@ RETURNS @returntable TABLE
 AS
 BEGIN
 	-- 
-	with Dependants ( BaseObjectName , BaseObjectType, ParentName, ParentType
+	with Dependants ( BaseObjectName , BaseObjectType, ParentSchemaName, ParentName, ParentType
 		, ThisObjectSchemaName, ThisObjectID, ThisObjectName , ThisObjectType , Level 
 		, referenced_database_name, referenced_server_name) 
 	as 
     ( select  -- Base level object
 		  base.name		 as BaseObjectName 
         , base.type_desc as BaseObjectType
+		, ps.name as ParentSchemaName
 		, parent.name	 as ParentName
 		, parent.type_desc	as ParentType
         , s.name		 as ThisObjectSchemaName
@@ -50,12 +52,14 @@ BEGIN
 			join sys.schemas s on s.schema_id = base.schema_id
 			left join sys.sql_expression_dependencies ed on ed.referenced_id = base.object_id
 			left join sys.objects parent on parent.object_id = ed.referencing_id 
+			left join sys.schemas ps on ps.schema_id = parent.schema_id
 		where base.type in ('P') 
 		and base.name = @BaseObjectName and s.name = @BaseObjectSchema
 
 		UNION ALL -- Child objects in the same database.
 		select main.BaseObjectName 
 			, main.BaseObjectType
+			, ps.name as ParentSchemaName
 			, parent.name as ParentName
 			, parent.type_desc as ParentType
 			, s.name 
@@ -69,6 +73,7 @@ BEGIN
 			join sys.schemas s on s.schema_id = thisObj.schema_id
 			join sys.sql_expression_dependencies ed on ed.referenced_entity_name = thisObj.name 	
 			join sys.objects parent on parent.object_id = ed.referencing_id 
+			join sys.schemas ps on ps.schema_id = parent.schema_id
 			join Dependants as main on parent.object_id = main.ThisObjectID and parent.object_id <> thisObj.object_id 
 		where thisObj.type in ( 'P', 'U', 'V', 'FN', 'IF', 'TF') 
 		and parent.type  = 'P'  
@@ -77,6 +82,7 @@ BEGIN
 		UNION ALL -- objects referenced in other databases
 		select  main.BaseObjectName 
 			, main.BaseObjectType
+			, ps.name as ParentSchemaName
 			, parent.name as ParentName
 			, parent.type_desc as ParentType
 			, ed.referenced_schema_name 
@@ -88,6 +94,7 @@ BEGIN
 			, ed.referenced_server_name
 		from sys.sql_expression_dependencies ed
 			join sys.objects parent on parent.object_id = ed.referencing_id 
+			join sys.schemas ps on ps.schema_id = parent.schema_id
 			join Dependants as main on parent.object_id = main.ThisObjectID 
 		where ed.referenced_id is null 
 			and parent.type in ( 'P', 'U', 'V', 'FN', 'IF', 'TF')
@@ -98,6 +105,7 @@ BEGIN
 		, DB_NAME() AS DBName 
 		, BaseObjectName 
 		, BaseObjectType
+		, ParentSchemaName
 		, ParentName 
 		, ParentType
 		, ThisObjectSchemaName
@@ -113,10 +121,10 @@ BEGIN
 	-- Take a stab at setting the CRUD matrix for each table in each procedure.
 	
 	-- 1. Put found proc names into a table .
-	DECLARE @ObjTable TABLE (line int, ParentName nvarchar(255), ObjName nvarchar(255))
+	DECLARE @ObjTable TABLE (line int, ParentSchemaName nvarchar(255), ParentName nvarchar(255), ObjName nvarchar(255))
 	INSERT INTO @ObjTable
-	SELECT dense_rank() over( order by ParentObjectName), ParentObjectName, ThisObjectName 
-		FROM (select distinct ParentObjectName, ThisObjectName 
+	SELECT dense_rank() over( order by ParentObjectSchemaName, ParentObjectName), ParentObjectSchemaName, ParentObjectName, ThisObjectName 
+		FROM (select distinct ParentObjectSchemaName, ParentObjectName, ThisObjectName 
 				from @returntable 
 				where ParentObjectType = 'SQL_STORED_PROCEDURE'
 			) x
@@ -132,12 +140,12 @@ BEGIN
 	DECLARE @loc int -- lines of code count
 	DECLARE @crud TABLE (procname nvarchar(255), tablename nvarchar(255), crudmap int); 
 	DECLARE @TableNames Table (TableName nvarchar(255)); 
-	declare @objName nvarchar(255), @parentObjName nvarchar(255)
+	declare @objName nvarchar(255), @parentObjectSchemaName nvarchar(255), @parentObjName nvarchar(255)
 	declare @objcount int = (select count(distinct ParentName) from @ObjTable)
 	declare @objpos int = 1
 	WHILE @objpos <= @objcount
 	BEGIN
-		Select @parentObjName = (Select distinct ParentName from @ObjTable where line = @objpos)
+		Select distinct @parentObjectSchemaName = ParentSchemaName, @parentObjName = ParentName from @ObjTable where line = @objpos;
 
 		-- Load up the text of the proc. Initially used sp_helptext but calling this from other procs that insert-exec breaks things.
 		-- To preserve line breaks use string_split (2016 and above only!)
@@ -147,7 +155,7 @@ BEGIN
 			(SELECT OBJECT_DEFINITION(object_id) 
 				FROM sys.procedures p
 				JOIN sys.schemas s on s.schema_id = p.schema_id
-				WHERE p.name = @parentObjName and s.name = @BaseObjectSchema
+				WHERE p.name = @parentObjName and s.name = @parentObjectSchemaName
 			), char(10)
 		) 
 		where len(ltrim(replace(value, char(9), ' '))) > 1
@@ -166,20 +174,26 @@ BEGIN
 		-- in the procedure, which can happen. 
 		delete from @TableNames
 		insert into @TableNames (TableName)
-		select distinct ThisObjectNAme 
+		select distinct ThisObjectName 
 		from @returntable where ThisObjectType in ('USER_TABLE', 'OBJECT_OR_COLUMN')
 		AND ParentObjectName = @parentObjName;
  
- 		-- look for the crud words in the text
+ 		-- Look for the crud words in the text
+		-- Note that any combo of CUD will overwrite the srcdest field default of 1 (Read). On a rendered diagram the read arrow may not
+		-- then be shown depending on the overview level. This will reduce clutter and one can assume a read operation is likely in this case.
+		-- Also have a go at identifying calls to procedures or functions on remote databases. The exec keyword should 
+		-- always be disjoint with actual table names so the combo below should be okay.
 		INSERT INTO @crud
 		SELECT  ParentObjectName, TableName, sum(crudvalue)
 		FROM
 		(
-			SELECT firstword, ParentObjectName, TableName,
+			SELECT distinct firstword, ParentObjectName, TableName,
 				CASE firstword 
 					WHEN 'insert' THEN 2
 					WHEN 'update' THEN 4
 					WHEN 'delete' THEN 8
+					WHEN 'exec' THEN 1
+					WHEN 'execute' THEN 1
 				END AS crudvalue
 			FROM
 			(
@@ -187,12 +201,12 @@ BEGIN
 				FROM
 				(
 					SELECT @parentObjName as ParentObjectName, TableName,  
-						ltrim(replace(code, char(9), ' ')) as code, PATINDEX('%' + TableName + '%', code)  as pos
+						ltrim(replace(code, char(9), ' ')) as code, PATINDEX('%[ .[]' + TableName + '%', code)  as pos
 					FROM @sptext  cross join @TableNames
 				) x where pos > 0
 				and left(ltrim(code), 2) <> '--'
 			 ) y
-			 WHERE firstword in ('insert','update','delete') -- possibility of looking for ddl as well (create, drop, etc)?
+			 WHERE firstword in ('insert','update','delete', 'exec', 'execute') -- possibility of looking for ddl as well (create, drop, etc)?
 		) z
 		GROUP BY z.ParentObjectName, z.TableName
 
@@ -202,6 +216,15 @@ BEGIN
 		FROM @returntable r
 		JOIN @crud c on c.procname = r.ParentObjectName
 			AND c.tablename = r.ThisObjectName
+
+		-- Then update return table with remote execs
+		-- if it's a remote db and the crudmap is still 1 (read) => it's some sort of called object.
+		UPDATE r
+		SET r.ThisObjectType = 'EXEC'
+		FROM @returntable r
+		JOIN @crud c on c.procname = r.ParentObjectName
+			AND c.tablename = r.ThisObjectName
+		WHERE r.referenced_database_name is not null and r.ThisObjectType = 'OBJECT_OR_COLUMN' and c.crudmap = 1
 
 		-- next procedure
 		Set @objpos = @objpos + 1
