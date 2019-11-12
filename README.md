@@ -1,7 +1,7 @@
 # GraphDoc
 Draw graphs of stored procedure calls and object usage.
 
-![GraphDoc](/hub_y.png)
+![GraphDoc](/Hub_Y.png)
 
 ## Prerequisites
 Some use of the string_split() t-sql command in the dependency table generator so your database needs 
