@@ -1,8 +1,6 @@
 # GraphDoc
 Draw graphs of stored procedure calls and object usage.
 
-![GraphDoc](/Hub_Y.png)
-
 ## Prerequisites
 Some use of the string_split() t-sql command in the dependency table generator so your database needs 
 a minimum compatibility level 130 (i.e. SQL Server 2016 or higher).
@@ -48,7 +46,32 @@ Dot command
 ```
 dot -Tsvg HubConsumeFMPOChanges.gv > HubConsumeFMPOChanges.svg
 ```
+To get
+![GraphDoc](/Hub_Y.png)
+
+You could do the whole thing on the command line. Put the sql above into a script, then something like
+```cmd
+sqlcmd -S "myServer\myInstance" -d myDBName -i "script.sql" -E -h -1 | dot  -Tsvg > myFile.svg
+```
 
 ### Job Graphs
+You can also pass an SQLServer agent job name and produce a diagram showing an overview of the job and
+the individual steps that make it up.
+
+In SSMS
+```
+:out myFolder\graphtest.gv 
+
+DECLARE @RC int
+
+EXECUTE @RC = [GraphDoc].[usp_cs_Job_Graphs] 
+   @JobName = 'GraphTest'
+  ,@bundle = 'Y'
+
+GO
+
+```
+
+![GraphDoc](/job.png)
 
 ## Licence
