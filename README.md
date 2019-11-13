@@ -66,7 +66,6 @@ DECLARE @RC int
 
 EXECUTE @RC = [GraphDoc].[usp_cs_Job_Graphs] 
    @JobName = 'GraphTest'
-  ,@bundle = 'Y'
 
 GO
 
