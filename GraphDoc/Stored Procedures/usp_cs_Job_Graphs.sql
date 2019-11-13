@@ -139,9 +139,9 @@ BEGIN
 	set @ddl = '
 		IF EXISTS ( SELECT * 
 				FROM   sysobjects 
-				WHERE  id = object_id(N''' + @procname + ''') 
+				WHERE  id = object_id(N''GraphDoc.' + @procname + ''') 
 					   and OBJECTPROPERTY(id, N''IsProcedure'') = 1 )
-		DROP PROCEDURE ' + @procname
+		DROP PROCEDURE GraphDoc.' + @procname
 	exec (@ddl)	
 
 	/*
@@ -288,9 +288,9 @@ BEGIN
 		set @ddl = '
 			IF EXISTS ( SELECT * 
 					FROM   sysobjects 
-					WHERE  id = object_id(N''' + @procname + ''') 
+					WHERE  id = object_id(N''GraphDoc.' + @procname + ''') 
 						   and OBJECTPROPERTY(id, N''IsProcedure'') = 1 )
-			DROP PROCEDURE ' + @procname
+			DROP PROCEDURE GraphDoc.' + @procname
 		exec (@ddl)
 		
 		/* next step */		
