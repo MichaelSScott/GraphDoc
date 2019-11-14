@@ -47,7 +47,7 @@ Dot command
 dot -Tsvg HubConsumeFMPOChanges.gv > HubConsumeFMPOChanges.svg
 ```
 To get
-![GraphDoc](/Hub_Y.png)
+![GraphDoc](/images/Hub_Y.png)
 
 You could do the whole thing on the command line. Put the sql above into a script, then something like
 ```cmd
@@ -71,7 +71,7 @@ GO
 
 ```
 A sample of the output:
-![GraphDoc](/job.png)
+![GraphDoc](/images/job.png)
 
 ## Licence
 MIT
