@@ -64,6 +64,7 @@
     <Folder Include="Scripts\" />
     <Folder Include="GraphDoc\User Defined Types\" />
     <Folder Include="GraphDoc\Stored Procedures\" />
+    <Folder Include="images" />
   </ItemGroup>
   <ItemGroup>
     <Build Include="GraphDoc\Functions\udf_cs_DepTable.sql" />
