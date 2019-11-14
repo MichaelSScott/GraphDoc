@@ -99,6 +99,7 @@ BEGIN
 		where ed.referenced_id is null 
 			and parent.type in ( 'P', 'U', 'V', 'FN', 'IF', 'TF')
 			and ed.referenced_database_name is not null
+			and ed.is_Ambiguous = 0 -- remove 3 or 4 part identifiers that are not actually to other dbs
 	)   
 	INSERT @returntable
 	select  @@Servername AS ServerName
