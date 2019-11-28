@@ -181,7 +181,7 @@ AS
 		-- Close the subgraph.
 		insert into #gvfile values ('		} # end local')
 
-		-- Get the source tables and views on the local db used by the base object
+		-- Get the source tables and views, etc, on the local db used by the base object
 		-- and create the edges for them
 		-- These could go inside the above subgraph but for symmetry with the non-local dbs put them after. 
 
@@ -192,6 +192,13 @@ AS
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType in ('USER_TABLE', 'VIEW')
+			AND srcdest & 1 = 1 
+
+			INSERT INTO #gvfile
+			SELECT distinct '		' + case when @overview = 'Y' then  ThisObjectName + isnull(@thisbaseobj, '') else ThisObjectName end  + ' -> ' + BaseObjectName + ' [arrowhead=dot, color=lightblue, tooltip="uses"];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType like '%FUNCTION'
 			AND srcdest & 1 = 1 
 
 		-- Get a list of target tables on the local db as for sources
@@ -231,6 +238,13 @@ AS
 			FROM @dep 
 			WHERE Level > 0 
 			AND ThisObjectType in ('USER_TABLE', 'VIEW')
+			and srcdest & 1 = 1
+
+			INSERT INTO #gvfile
+			SELECT distinct  '		' + ThisObjectName + ' -> ' +  ParentObjectName + ' [arrowhead=dot, color=lightblue, tooltip="uses"];'
+			FROM @dep 
+			WHERE Level > 0 
+			AND ThisObjectType like '%FUNCTION'
 			and srcdest & 1 = 1
 
 			INSERT INTO #gvfile
